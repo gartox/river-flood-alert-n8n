@@ -1,0 +1,464 @@
+{
+  "name": "River Flood Early Warning with Open-Meteo and Ollama",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f001",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1040,
+        -120
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f002",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1040,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "stations",
+              "name": "stations",
+              "type": "array",
+              "value": "={{ [{ name: 'Usumacinta at Boca del Cerro (Tabasco, MX)', latitude: 17.52, longitude: -91.48, alert_m3s: 5000 }, { name: 'Grijalva near Villahermosa (Tabasco, MX)', latitude: 18.09, longitude: -93.03, alert_m3s: 2500 }] }}"
+            },
+            {
+              "id": "rise-alert-pct",
+              "name": "rise_alert_pct",
+              "type": "number",
+              "value": 50
+            },
+            {
+              "id": "bulletin-language",
+              "name": "bulletin_language",
+              "type": "string",
+              "value": "English"
+            },
+            {
+              "id": "ollama-model",
+              "name": "ollama_model",
+              "type": "string",
+              "value": "gemma3:4b"
+            },
+            {
+              "id": "slack-webhook-url",
+              "name": "slack_webhook_url",
+              "type": "string",
+              "value": ""
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f003",
+      "name": "Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -800,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const config = $input.first().json;\nreturn config.stations.map((station) => ({ json: { station, rise_alert_pct: config.rise_alert_pct } }));"
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f004",
+      "name": "Expand Stations",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -560,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://flood-api.open-meteo.com/v1/flood?latitude={{ $json.station.latitude }}&longitude={{ $json.station.longitude }}&daily=river_discharge,river_discharge_max&forecast_days=7",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f005",
+      "name": "Fetch Open-Meteo Forecast",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -300,
+        -20
+      ],
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const config = $('Configuration').first().json;\nconst inputs = $input.all();\nconst output = inputs.map((item, index) => {\n  const station = config.stations[index] || {};\n  const response = item.json?.body && typeof item.json.body === 'object' ? item.json.body : item.json;\n  const daily = response?.daily;\n  const today = Array.isArray(daily?.river_discharge) ? Number(daily.river_discharge[0]) : NaN;\n  const peaks = Array.isArray(daily?.river_discharge_max) ? daily.river_discharge_max.map(Number).filter(Number.isFinite) : [];\n  const peak = peaks.length ? Math.max(...peaks) : NaN;\n  const peakIndex = peaks.length && Array.isArray(daily?.river_discharge_max) ? daily.river_discharge_max.findIndex((value) => Number(value) === peak) : -1;\n  const peakDate = peakIndex >= 0 && Array.isArray(daily?.time) ? daily.time[peakIndex] : null;\n  const dataMissing = !Number.isFinite(today) || !Number.isFinite(peak);\n  const alert = Number(station.alert_m3s);\n  const rise = Number(config.rise_alert_pct);\n  const atRisk = !dataMissing && ((peak >= alert) || (today > 0 && peak >= today * (1 + rise / 100)));\n  return {\n    name: station.name,\n    today_m3s: dataMissing ? null : today,\n    peak_m3s: dataMissing ? null : peak,\n    peak_date: dataMissing ? null : peakDate,\n    alert_m3s: Number.isFinite(alert) ? alert : null,\n    at_risk: atRisk,\n    data_missing: dataMissing\n  };\n});\nreturn output.map((station) => ({ json: station }));"
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f006",
+      "name": "Evaluate Station",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const config = $('Configuration').first().json;\nconst stations = $input.all().map((item) => item.json);\nreturn [{ json: { ...config, stations } }];"
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f007",
+      "name": "Aggregate Stations",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You write short river flood bulletins for an operations team. Use only the data provided; never invent water levels, places or forecasts. Write in {{ $('Configuration').first().json.bulletin_language }}, in plain text without markdown headings, under 150 words. Start with one line saying whether any point needs attention. Then give one line per point with today's discharge, the 7-day peak and its date. For at-risk points, add one practical, non-alarmist next step (for example: monitor every few hours, check local civil protection notices). Remind readers that this is a model forecast and official warnings take priority.\n\nForecast summary (discharge in m³/s, source: Open-Meteo Flood API, GloFAS model):\n{{ JSON.stringify($json.stations) }}",
+        "options": {}
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f008",
+      "name": "Write Bulletin",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        500,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "options": {},
+        "model": "={{ $('Configuration').first().json.ollama_model }}"
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f009",
+      "name": "Ollama Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        500,
+        220
+      ],
+      "credentials": {
+        "ollamaApi": {
+          "id": "ollama-account-example-id",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "risk-and-webhook",
+              "leftValue": "={{ $('Aggregate Stations').first().json.stations.some((station) => station.at_risk) && $('Configuration').first().json.slack_webhook_url !== '' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f010",
+      "name": "At Risk With Slack Configured",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        760,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration').first().json.slack_webhook_url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: '🌊 River flood early warning\\n' + ($json.text || $json.output || '') } }}",
+        "options": {}
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f011",
+      "name": "Notify Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1020,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "all-clear-status",
+              "name": "status",
+              "type": "string",
+              "value": "all_clear"
+            },
+            {
+              "id": "all-clear-bulletin",
+              "name": "bulletin",
+              "type": "string",
+              "value": "={{ $json.text || $json.output || '' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f012",
+      "name": "All Clear Summary",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1020,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "# River flood early warning\n\nSetup:\n1. Import this workflow.\n2. Configure the Ollama credential and edit stations/thresholds.\n3. Add a Slack webhook if notifications are wanted, then test manually.\n\nThis is decision support based on model forecasts, not an official warning system. Official civil protection notices take priority.",
+        "height": 300,
+        "width": 360,
+        "color": 5
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f013",
+      "name": "Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1060,
+        -420
+      ]
+    },
+    {
+      "parameters": {
+        "content": "Configuration and one item per monitored station. The alert thresholds are examples; replace them with locally appropriate values.",
+        "height": 180,
+        "width": 300,
+        "color": 4
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f014",
+      "name": "Configuration Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -820,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "content": "Open-Meteo Flood API: seven-day discharge forecast. Requests continue on error so one missing station does not stop the rest.",
+        "height": 180,
+        "width": 320,
+        "color": 6
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f015",
+      "name": "Forecast Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -360,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "content": "Local Ollama writes a short plain-text bulletin using only the evaluated station data.",
+        "height": 150,
+        "width": 280,
+        "color": 3
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f016",
+      "name": "Bulletin Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        420,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "content": "Slack is called only when at least one station is at risk and the webhook URL is non-empty. Otherwise the workflow records an all-clear summary.",
+        "height": 180,
+        "width": 360,
+        "color": 2
+      },
+      "id": "b9b5e5a0-6c4e-4bb6-8d4d-0c0f4059f017",
+      "name": "Notification Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        760,
+        260
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration": {
+      "main": [
+        [
+          {
+            "node": "Expand Stations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Stations": {
+      "main": [
+        [
+          {
+            "node": "Fetch Open-Meteo Forecast",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Open-Meteo Forecast": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Station",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Station": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Stations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Stations": {
+      "main": [
+        [
+          {
+            "node": "Write Bulletin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Bulletin": {
+      "main": [
+        [
+          {
+            "node": "At Risk With Slack Configured",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Write Bulletin",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "At Risk With Slack Configured": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "All Clear Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
